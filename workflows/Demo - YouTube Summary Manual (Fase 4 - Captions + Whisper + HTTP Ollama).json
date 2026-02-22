@@ -1,0 +1,825 @@
+{
+  "name": "Demo - YouTube Summary Manual (Fase 4 - Captions + Whisper + HTTP Ollama)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "1",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "position": [
+        208,
+        304
+      ],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "type": "string",
+              "name": "youtubeUrl",
+              "id": "a1",
+              "value": "https://www.youtube.com/watch?v=KsezxZXEP1o"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2",
+      "name": "Set - Input YouTube URL",
+      "type": "n8n-nodes-base.set",
+      "position": [
+        432,
+        304
+      ],
+      "typeVersion": 3.4
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const rawUrl = String($json.youtubeUrl || '').trim();\n\nfunction extractVideoId(input) {\n  if (!input) return '';\n  try {\n    const u = new URL(input);\n    const host = u.hostname.replace(/^www\\./, '');\n\n    if (host === 'youtu.be') {\n      return u.pathname.split('/').filter(Boolean)[0] || '';\n    }\n\n    if (host.endsWith('youtube.com')) {\n      const v = u.searchParams.get('v');\n      if (v) return v;\n\n      const parts = u.pathname.split('/').filter(Boolean);\n      const shortsIndex = parts.indexOf('shorts');\n      if (shortsIndex !== -1 && parts[shortsIndex + 1]) return parts[shortsIndex + 1];\n\n      const embedIndex = parts.indexOf('embed');\n      if (embedIndex !== -1 && parts[embedIndex + 1]) return parts[embedIndex + 1];\n    }\n  } catch (e) {\n    // Fallback regex parsing for malformed URLs\n  }\n\n  const m = input.match(/(?:v=|youtu\\.be\\/|shorts\\/|embed\\/)([A-Za-z0-9_-]{11})/);\n  return m ? m[1] : '';\n}\n\nconst videoId = extractVideoId(rawUrl);\n\nreturn {\n  youtubeUrl: rawUrl,\n  videoId\n};"
+      },
+      "id": "3",
+      "name": "Code - Extract Video ID",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        672,
+        304
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "typeValidation": "strict",
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": "",
+              "id": "c1",
+              "leftValue": "={{$json.videoId}}"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "4",
+      "name": "IF - Video ID Valid",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        912,
+        304
+      ],
+      "typeVersion": 2.2
+    },
+    {
+      "parameters": {
+        "url": "={{ \"https://www.youtube.com/watch?v=\" + $json.videoId + \"&hl=en\" }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "17",
+      "name": "HTTP - Fetch YouTube Watch Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1152,
+        112
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const html = String($json.body ?? $json.data ?? $json.response ?? '').trim();\nconst youtubeUrl = String($node['Set - Input YouTube URL'].json.youtubeUrl || '');\nconst videoId = String($node['Code - Extract Video ID'].json.videoId || '');\n\nfunction extractPlayerResponse(page) {\n  const marker = 'ytInitialPlayerResponse = ';\n  const idx = page.indexOf(marker);\n  if (idx === -1) return null;\n\n  const start = idx + marker.length;\n  let depth = 0;\n  let inString = false;\n  let escaped = false;\n  let end = -1;\n\n  for (let i = start; i < page.length; i++) {\n    const ch = page[i];\n    if (inString) {\n      if (escaped) escaped = false;\n      else if (ch === '\\\\') escaped = true;\n      else if (ch === '\"') inString = false;\n      continue;\n    }\n\n    if (ch === '\"') {\n      inString = true;\n      continue;\n    }\n\n    if (ch === '{') {\n      depth++;\n      continue;\n    }\n\n    if (ch === '}') {\n      depth--;\n      if (depth === 0) {\n        end = i + 1;\n        break;\n      }\n    }\n  }\n\n  if (end === -1) return null;\n\n  try {\n    return JSON.parse(page.slice(start, end));\n  } catch {\n    return null;\n  }\n}\n\nfunction toVtt(url) {\n  if (!url) return '';\n  try {\n    const u = new URL(url);\n    u.searchParams.set('fmt', 'vtt');\n    return u.toString();\n  } catch {\n    return '';\n  }\n}\n\nfunction scoreTrack(track, lang) {\n  const lc = String(track?.languageCode || '').toLowerCase();\n  const isAuto = String(track?.kind || '').toLowerCase() === 'asr';\n\n  let score = 0;\n  if (lc === lang) score += 100;\n  else if (lc.startsWith(lang + '-')) score += 90;\n  else if (lc.includes(lang)) score += 70;\n\n  if (!isAuto) score += 20;\n  return score;\n}\n\nconst player = extractPlayerResponse(html);\nconst tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];\n\nconst esTrack = tracks\n  .filter((t) => scoreTrack(t, 'es') > 0)\n  .sort((a, b) => scoreTrack(b, 'es') - scoreTrack(a, 'es'))[0];\n\nconst enTrack = tracks\n  .filter((t) => scoreTrack(t, 'en') > 0)\n  .sort((a, b) => scoreTrack(b, 'en') - scoreTrack(a, 'en'))[0];\n\nreturn {\n  youtubeUrl,\n  videoId,\n  esTrackUrlVtt: toVtt(esTrack?.baseUrl),\n  enTrackUrlVtt: toVtt(enTrack?.baseUrl)\n};"
+      },
+      "id": "18",
+      "name": "Code - Extract Caption Tracks (ES/EN)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1376,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "typeValidation": "strict",
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": "",
+              "id": "c_es_track",
+              "leftValue": "={{$json.esTrackUrlVtt}}"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "19",
+      "name": "IF - ES Track Available",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1600,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.esTrackUrlVtt}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "20",
+      "name": "HTTP - Get Transcript ES (VTT)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1760,
+        -160
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "typeValidation": "strict",
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": "",
+              "id": "c_es_tx",
+              "leftValue": "={{ String($json.body ?? $json.data ?? $json.response ?? \"\").trim() }}"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "21",
+      "name": "IF - ES Transcript Available",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1984,
+        -176
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "typeValidation": "strict",
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": "",
+              "id": "c_en_track",
+              "leftValue": "={{$json.enTrackUrlVtt}}"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "22",
+      "name": "IF - EN Track Available",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1840,
+        128
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.enTrackUrlVtt}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "23",
+      "name": "HTTP - Get Transcript EN (VTT)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2032,
+        128
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "typeValidation": "strict",
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": "",
+              "id": "c_en_tx",
+              "leftValue": "={{ String($json.body ?? $json.data ?? $json.response ?? \"\").trim() }}"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "24",
+      "name": "IF - EN Transcript Available",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        384
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8177/transcribe",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "youtubeUrl",
+              "value": "={{$node[\"Set - Input YouTube URL\"].json.youtubeUrl}}"
+            },
+            {
+              "name": "languageHint",
+              "value": "es"
+            },
+            {
+              "name": "model",
+              "value": "small"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "id": "25",
+      "name": "HTTP - Whisper Transcribe (Local)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1984,
+        544
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "typeValidation": "strict",
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": "",
+              "id": "c_whisper_tx",
+              "leftValue": "={{ String($json.transcriptText ?? \"\").trim() }}"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "26",
+      "name": "IF - Whisper Transcript Available",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2224,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function fixMojibake(text) {\n  const t = String(text ?? '');\n  if (!t) return '';\n  if (!/(\\u00C3|\\u00C2|\\u00E2)/.test(t)) return t;\n\n  try {\n    return Buffer.from(t, 'latin1').toString('utf8');\n  } catch {\n    return t;\n  }\n}\n\nconst youtubeUrl = String($node['Set - Input YouTube URL'].json.youtubeUrl || '');\nconst videoId = String($node['Code - Extract Video ID'].json.videoId || '');\n\nconst items = $input.all();\nconst out = [];\n\nfor (const item of items) {\n  const data = item.json || {};\n\n  const whisperText = fixMojibake(data.transcriptText).trim();\n  if (whisperText) {\n    const transcriptText = whisperText.replace(/\\s+/g, ' ').trim();\n    if (transcriptText) {\n      out.push({ json: { youtubeUrl, videoId, transcriptText } });\n    }\n    continue;\n  }\n\n  const raw = String(\n    data.stdout ??\n    data.body ??\n    data.data ??\n    data.response ??\n    ''\n  ).replace(/\\r/g, '');\n\n  if (!raw.trim()) continue;\n\n  const lines = raw.split('\\n');\n  const cleanedLines = [];\n  let prev = '';\n\n  for (const line of lines) {\n    const t = line.trim();\n    if (!t) continue;\n    if (t === 'WEBVTT') continue;\n    if (/^\\d+$/.test(t)) continue;\n    if (/^\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s+-->\\s+\\d{2}:\\d{2}:\\d{2}\\.\\d{3}/.test(t)) continue;\n\n    const normalized = t\n      .replace(/&amp;/g, '&')\n      .replace(/&lt;/g, '<')\n      .replace(/&gt;/g, '>')\n      .replace(/&quot;/g, '\"')\n      .replace(/&#39;/g, \"'\");\n\n    if (normalized === prev) continue;\n    prev = normalized;\n    cleanedLines.push(normalized);\n  }\n\n  const transcriptText = fixMojibake(cleanedLines.join(' ')).replace(/\\s+/g, ' ').trim();\n  if (transcriptText) {\n    out.push({ json: { youtubeUrl, videoId, transcriptText } });\n  }\n}\n\nreturn out;"
+      },
+      "id": "9",
+      "name": "Code - Normalize Transcript Text",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        1472,
+        256
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "type": "string",
+              "name": "prompt",
+              "id": "a2",
+              "value": "=Resume la siguiente transcripcion de YouTube en espanol.\\n\\nFormato requerido:\\n- 1 parrafo corto de resumen general\\n- 5 a 8 bullets con ideas clave\\n- 1 bloque final: \"Conclusiones practicas\" (maximo 3 bullets)\\n\\nSe claro, evita relleno, no inventes informacion.\\n\\nTranscripcion:\\n{{$json.transcriptText}}"
+            },
+            {
+              "type": "string",
+              "name": "youtubeUrl",
+              "id": "a3",
+              "value": "={{$json.youtubeUrl}}"
+            },
+            {
+              "type": "string",
+              "name": "videoId",
+              "id": "a4",
+              "value": "={{$json.videoId}}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "10",
+      "name": "Set - Build Summarization Prompt",
+      "type": "n8n-nodes-base.set",
+      "position": [
+        2272,
+        288
+      ],
+      "typeVersion": 3.4
+    },
+    {
+      "parameters": {
+        "jsCode": "function fixMojibake(text) {\n  const t = String(text ?? '');\n  if (!t) return '';\n  if (!/(\\u00C3|\\u00C2|\\u00E2)/.test(t)) return t;\n  try {\n    return Buffer.from(t, 'latin1').toString('utf8');\n  } catch {\n    return t;\n  }\n}\n\nfunction esc(s) {\n  return String(s)\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;');\n}\n\nfunction toPrettyHtml(summaryText) {\n  const lines = summaryText\n    .split('\\n')\n    .map((l) => l.trim())\n    .filter((l) => l.length > 0);\n\n  if (!lines.length) return '';\n\n  const parts = [];\n  let inList = false;\n\n  for (const line of lines) {\n    const isBullet = /^[-*.]\\s+/.test(line);\n\n    if (isBullet) {\n      if (!inList) {\n        parts.push('<ul style=\"margin:0 0 14px 20px;padding:0;line-height:1.6;\">');\n        inList = true;\n      }\n      const content = line.replace(/^[-*.]\\s+/, '');\n      parts.push('<li style=\"margin:0 0 8px 0;\">' + esc(content) + '</li>');\n      continue;\n    }\n\n    if (inList) {\n      parts.push('</ul>');\n      inList = false;\n    }\n\n    parts.push('<p style=\"margin:0 0 12px 0;line-height:1.65;\">' + esc(line) + '</p>');\n  }\n\n  if (inList) {\n    parts.push('</ul>');\n  }\n\n  return parts.join('');\n}\n\nconst youtubeUrl = String($node['Set - Build Summarization Prompt'].json.youtubeUrl || '');\nconst videoId = String($node['Set - Build Summarization Prompt'].json.videoId || '');\n\nconst items = $input.all();\nconst out = [];\n\nfor (const item of items) {\n  const j = item.json || {};\n\n  const raw = [\n    j.response,\n    j.output,\n    j.text,\n    j.completion,\n    j.data?.response,\n    j.body?.response,\n    j.message?.content,\n  ].find((v) => typeof v === 'string' && v.trim().length > 0);\n\n  if (!raw) continue;\n\n  const summary = fixMojibake(String(raw).replace(/\\r/g, '').trim());\n  if (!summary) continue;\n\n  const summaryHtml = toPrettyHtml(summary);\n  if (!summaryHtml) continue;\n\n  out.push({\n    json: {\n      youtubeUrl,\n      videoId,\n      summary,\n      summaryHtml\n    }\n  });\n}\n\nreturn out;"
+      },
+      "id": "13",
+      "name": "Code - Normalize Summary Output",
+      "type": "n8n-nodes-base.code",
+      "position": [
+        2752,
+        240
+      ],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "typeValidation": "strict",
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "operator": {
+                "operation": "notEmpty",
+                "type": "string"
+              },
+              "rightValue": "",
+              "id": "c4",
+              "leftValue": "={{$json.summary}}"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "14",
+      "name": "IF - Summary Valid",
+      "type": "n8n-nodes-base.if",
+      "position": [
+        2992,
+        240
+      ],
+      "typeVersion": 2.2
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "type": "string",
+              "name": "toEmail",
+              "id": "a5",
+              "value": "manuelgbalayo@gmail.com"
+            },
+            {
+              "type": "string",
+              "name": "subject",
+              "id": "a6",
+              "value": "=Resumen YouTube {{$json.videoId}}"
+            },
+            {
+              "type": "string",
+              "name": "bodyText",
+              "id": "a7",
+              "value": "=Resumen del video: {{$json.videoId}}\\nURL: {{$json.youtubeUrl}}\\n\\n{{$json.summary}}"
+            },
+            {
+              "type": "string",
+              "name": "bodyHtml",
+              "id": "a8",
+              "value": "=<div style=\"font-family:Arial,Helvetica,sans-serif;max-width:720px;margin:0 auto;padding:20px;color:#111;background:#fff;\"><h2 style=\"margin:0 0 8px 0;font-size:24px;\">Resumen de YouTube</h2><p style=\"margin:0 0 6px 0;color:#666;\">Video ID: <strong>{{$json.videoId}}</strong></p><p style=\"margin:0 0 16px 0;\"><a href=\"{{$json.youtubeUrl}}\" target=\"_blank\" style=\"color:#0b57d0;text-decoration:none;\">Abrir video</a></p><div style=\"border-top:1px solid #e5e7eb;margin:0 0 16px 0;\"></div>{{$json.summaryHtml}}</div>"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "15",
+      "name": "Set - Build Success Email",
+      "type": "n8n-nodes-base.set",
+      "position": [
+        3216,
+        240
+      ],
+      "typeVersion": 3.4
+    },
+    {
+      "parameters": {
+        "fromEmail": "manuelgbalayo@gmail.com",
+        "toEmail": "={{$json.toEmail}}",
+        "subject": "={{$json.subject}}",
+        "emailFormat": "both",
+        "text": "={{$json.bodyText}}",
+        "html": "={{$json.bodyHtml}}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "16",
+      "name": "Email - Send Summary",
+      "type": "n8n-nodes-base.emailSend",
+      "position": [
+        3440,
+        240
+      ],
+      "typeVersion": 2.1,
+      "webhookId": "322a8497-1c7e-4054-88ef-25788756afd5",
+      "credentials": {
+        "smtp": {
+          "id": "TWctvirgkwT33O9L",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "gemma3:12b"
+            },
+            {
+              "name": "prompt",
+              "value": "={{$json.prompt}}"
+            },
+            {
+              "name": "stream",
+              "value": "={{false}}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 1800000
+        }
+      },
+      "id": "27",
+      "name": "HTTP - Summarize with Ollama (Local)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        2528,
+        240
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set - Input YouTube URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Input YouTube URL": {
+      "main": [
+        [
+          {
+            "node": "Code - Extract Video ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Extract Video ID": {
+      "main": [
+        [
+          {
+            "node": "IF - Video ID Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Video ID Valid": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Fetch YouTube Watch Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Fetch YouTube Watch Page": {
+      "main": [
+        [
+          {
+            "node": "Code - Extract Caption Tracks (ES/EN)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Extract Caption Tracks (ES/EN)": {
+      "main": [
+        [
+          {
+            "node": "IF - ES Track Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - ES Track Available": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Get Transcript ES (VTT)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF - EN Track Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Get Transcript ES (VTT)": {
+      "main": [
+        [
+          {
+            "node": "IF - ES Transcript Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - ES Transcript Available": {
+      "main": [
+        [
+          {
+            "node": "Code - Normalize Transcript Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF - EN Track Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - EN Track Available": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Get Transcript EN (VTT)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP - Whisper Transcribe (Local)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Get Transcript EN (VTT)": {
+      "main": [
+        [
+          {
+            "node": "IF - EN Transcript Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - EN Transcript Available": {
+      "main": [
+        [
+          {
+            "node": "Code - Normalize Transcript Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP - Whisper Transcribe (Local)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Whisper Transcribe (Local)": {
+      "main": [
+        [
+          {
+            "node": "IF - Whisper Transcript Available",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Whisper Transcript Available": {
+      "main": [
+        [
+          {
+            "node": "Code - Normalize Transcript Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Normalize Transcript Text": {
+      "main": [
+        [
+          {
+            "node": "Set - Build Summarization Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Build Summarization Prompt": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Summarize with Ollama (Local)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP - Summarize with Ollama (Local)": {
+      "main": [
+        [
+          {
+            "node": "Code - Normalize Summary Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code - Normalize Summary Output": {
+      "main": [
+        [
+          {
+            "node": "IF - Summary Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF - Summary Valid": {
+      "main": [
+        [
+          {
+            "node": "Set - Build Success Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Build Success Email": {
+      "main": [
+        [
+          {
+            "node": "Email - Send Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "0c9e202e-3a5c-42ae-afd1-30525ae03627",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "7e9220afb11d6a5429a32e3e048a3ac7c9105e7070a4c19f63d31476679770b3"
+  },
+  "id": "JQf86Vzhbib73jek",
+  "tags": []
+}
