@@ -1,0 +1,110 @@
+﻿{
+    "nodes":  [
+                  {
+                      "id":  "p4-1",
+                      "name":  "Manual Trigger",
+                      "parameters":  {
+
+                                     },
+                      "type":  "n8n-nodes-base.manualTrigger",
+                      "position":  [
+                                       120,
+                                       300
+                                   ],
+                      "typeVersion":  1
+                  },
+                  {
+                      "id":  "p4-2",
+                      "name":  "RSS - Indeed NL",
+                      "parameters":  {
+                                         "url":  "https://nl.indeed.com/rss?q=data+analyst\u0026l=Netherlands\u0026fromage=7\u0026sort=date"
+                                     },
+                      "type":  "n8n-nodes-base.rssFeedRead",
+                      "position":  [
+                                       340,
+                                       300
+                                   ],
+                      "typeVersion":  1.1
+                  },
+                  {
+                      "id":  "p4-3",
+                      "name":  "Set CV Profile",
+                      "parameters":  {
+                                         "options":  {
+
+                                                     },
+                                         "assignments":  {
+                                                             "assignments":  [
+                                                                                 {
+                                                                                     "value":  "sql,python,power bi,tableau,excel,etl,analytics,dashboard,stakeholder,experimentation",
+                                                                                     "name":  "cv_keywords",
+                                                                                     "id":  "a1",
+                                                                                     "type":  "string"
+                                                                                 }
+                                                                             ]
+                                                         }
+                                     },
+                      "type":  "n8n-nodes-base.set",
+                      "position":  [
+                                       560,
+                                       300
+                                   ],
+                      "typeVersion":  3.4
+                  },
+                  {
+                      "id":  "p4-4",
+                      "name":  "Normalize+Filter+Score+Dedupe",
+                      "parameters":  {
+                                         "jsCode":  "function toMillis(v) {\n  if (!v) return null;\n  const d = new Date(v);\n  const t = d.getTime();\n  return Number.isNaN(t) ? null : t;\n}\n\nfunction isNetherlands(location) {\n  const text = String(location || \u0027\u0027).toLowerCase();\n  const keys = [\u0027netherlands\u0027, \u0027nederland\u0027, \u0027nl\u0027, \u0027amsterdam\u0027, \u0027rotterdam\u0027, \u0027utrecht\u0027, \u0027den haag\u0027, \u0027the hague\u0027, \u0027eindhoven\u0027];\n  return keys.some(k =\u003e text.includes(k));\n}\n\nconst now = Date.now();\nconst sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000);\nconst sd = this.getWorkflowStaticData(\u0027global\u0027);\nif (!sd.seen) sd.seen = {};\n\nconst ttl = 45 * 24 * 60 * 60 * 1000;\nfor (const [k, ts] of Object.entries(sd.seen)) {\n  if (!ts || (now - ts) \u003e ttl) delete sd.seen[k];\n}\n\nconst out = [];\nfor (const item of items) {\n  const src = item.json || {};\n\n  const rawTitle = src.title || \u0027\u0027;\n  const applyUrl = src.link || \u0027\u0027;\n  const dateRaw = src.isoDate || src.pubDate || null;\n  const dateMs = toMillis(dateRaw);\n\n  const parts = String(rawTitle).split(\u0027 - \u0027).map(p =\u003e p.trim()).filter(Boolean);\n  let title = rawTitle;\n  let company = \u0027\u0027;\n  let location = \u0027\u0027;\n  if (parts.length \u003e= 3) {\n    title = parts[0];\n    company = parts[1];\n    location = parts.slice(2).join(\u0027 - \u0027);\n  } else if (parts.length === 2) {\n    title = parts[0];\n    company = parts[1];\n  }\n\n  const description = src.contentSnippet || src.content || src.summary || \u0027\u0027;\n\n  if (!applyUrl) continue;\n  if (!dateMs) continue;\n  if (dateMs \u003c sevenDaysAgo || dateMs \u003e now + 24 * 60 * 60 * 1000) continue;\n  if (!isNetherlands(location)) continue;\n\n  const dedupeId = `indeed_nl_rss|${applyUrl}`;\n  if (sd.seen[dedupeId]) continue;\n\n  const text = `${title} ${description}`.toLowerCase();\n  const cvKeywords = String(src.cv_keywords || \u0027\u0027).split(\u0027,\u0027).map(s =\u003e s.trim().toLowerCase()).filter(Boolean);\n\n  let score = 20;\n  let hits = 0;\n  for (const kw of cvKeywords) {\n    if (text.includes(kw)) hits++;\n  }\n  score += Math.min(70, hits * 8);\n  if (text.includes(\u0027data analyst\u0027)) score += 10;\n  score = Math.max(0, Math.min(100, Math.round(score)));\n\n  const matchLabel = score \u003e= 75 ? \u0027High\u0027 : (score \u003e= 50 ? \u0027Medium\u0027 : \u0027Low\u0027);\n  sd.seen[dedupeId] = now;\n\n  out.push({\n    json: {\n      datePosted: new Date(dateMs).toISOString(),\n      title,\n      company,\n      location,\n      matchScore: score,\n      matchLabel,\n      applyUrl,\n      source: \u0027indeed_nl_rss\u0027\n    }\n  });\n}\n\nreturn out;",
+                                         "mode":  "runOnceForAllItems"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "position":  [
+                                       820,
+                                       300
+                                   ],
+                      "typeVersion":  2
+                  }
+              ],
+    "meta":  {
+
+             },
+    "name":  "Jobs NL Data Analyst - Phase 4 (Add Dedupe)",
+    "pinData":  {
+
+                },
+    "connections":  {
+                        "RSS - Indeed NL":  {
+                                                "main":  [
+                                                             {
+                                                                 "node":  "Set CV Profile",
+                                                                 "type":  "main",
+                                                                 "index":  0
+                                                             }
+                                                         ]
+                                            },
+                        "Set CV Profile":  {
+                                               "main":  [
+                                                            {
+                                                                "node":  "Normalize+Filter+Score+Dedupe",
+                                                                "type":  "main",
+                                                                "index":  0
+                                                            }
+                                                        ]
+                                           },
+                        "Manual Trigger":  {
+                                               "main":  [
+                                                            {
+                                                                "node":  "RSS - Indeed NL",
+                                                                "type":  "main",
+                                                                "index":  0
+                                                            }
+                                                        ]
+                                           }
+                    },
+    "versionId":  "2c0eaeb1-6468-4f0c-8c96-9efb6d56a3d0",
+    "settings":  {
+                     "executionOrder":  "v1"
+                 },
+    "active":  false
+}
