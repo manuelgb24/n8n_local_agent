@@ -27,6 +27,7 @@ No external SaaS dependencies.
 ## ⚙️ How The Demo Workflow Works
 
 Manual Trigger (n8n)
+
 ↓  
 Extract YouTube Video ID  
 ↓  
